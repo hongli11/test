@@ -1,11 +1,11 @@
 #!/bin/bash
-# build_usb_rootfs.sh - 为海思USB刷机包构建纯净Ubuntu系统
+# build_ttl_rootfs.sh - 为海思TTL刷机包构建纯净Ubuntu系统
 set -e
 
-echo "=== 开始为USB刷机包构建纯净根文件系统 ==="
+echo "=== 开始为TTL刷机包构建纯净根文件系统 ==="
 
 # 1. 准备工作目录
-ROOTFS_DIR=$(pwd)/usb_pure_rootfs
+ROOTFS_DIR=$(pwd)/ttl_pure_rootfs  # 改为 TTL 专用目录
 sudo rm -rf "$ROOTFS_DIR"
 mkdir -p "$ROOTFS_DIR"
 
@@ -26,14 +26,14 @@ sudo mount -o bind /dev "$ROOTFS_DIR/dev"
 sudo mount -o bind /dev/pts "$ROOTFS_DIR/dev/pts"
 
 # 4. 创建在Chroot内部执行的配置脚本
-cat > /tmp/usb_chroot_install.sh << 'INNER_EOF'
+cat > /tmp/ttl_chroot_install.sh << 'INNER_EOF'
 #!/bin/bash
 set -e
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-echo "（USB包）配置软件源与系统..."
+echo "（TTL包）配置软件源与系统..."
 
 # ★★★ 关键修复：提前处理包管理器状态 ★★★
 echo "步骤1: 修复包管理器基础状态..."
@@ -290,18 +290,18 @@ rm -f /usr/bin/qemu-arm-static
 # 最后修复一次包状态
 dpkg --configure -a 2>/dev/null || true
 
-echo "✅ USB包专用纯净系统配置完成"
+echo "✅ TTL包专用纯净系统配置完成"
 echo "   已安装: nano, docker, Xray, v2raya, OpenList"
 echo "   OpenList 将在首次启动时生成管理员密码"
 INNER_EOF
 
-sudo chmod +x /tmp/usb_chroot_install.sh
-sudo cp /tmp/usb_chroot_install.sh "$ROOTFS_DIR/tmp/"
+sudo chmod +x /tmp/ttl_chroot_install.sh
+sudo cp /tmp/ttl_chroot_install.sh "$ROOTFS_DIR/tmp/"
 
 # 5. 执行Chroot脚本
 echo "在Chroot中执行安装脚本..."
 # 设置超时和错误处理
-if ! timeout 1800 sudo chroot "$ROOTFS_DIR" /bin/bash -c "/tmp/usb_chroot_install.sh"; then
+if ! timeout 1800 sudo chroot "$ROOTFS_DIR" /bin/bash -c "/tmp/ttl_chroot_install.sh"; then
     echo "⚠️ Chroot脚本执行超时或有错误，尝试继续..."
 fi
 
@@ -313,8 +313,8 @@ sudo umount -lf "$ROOTFS_DIR/sys" 2>/dev/null || true
 sudo umount -lf "$ROOTFS_DIR/proc" 2>/dev/null || true
 
 # 7. 清理临时文件
-sudo rm -f /tmp/usb_chroot_install.sh "$ROOTFS_DIR/tmp/usb_chroot_install.sh" 2>/dev/null || true
+sudo rm -f /tmp/ttl_chroot_install.sh "$ROOTFS_DIR/tmp/ttl_chroot_install.sh" 2>/dev/null || true
 
-echo "=== USB刷机包纯净根文件系统构建完成 ==="
+echo "=== TTL刷机包纯净根文件系统构建完成 ==="
 echo "根文件系统位于: $ROOTFS_DIR"
 echo "大小: $(sudo du -sh "$ROOTFS_DIR" | cut -f1)"
