@@ -1,0 +1,89 @@
+name: Build Pure USB Package
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-usb-pure:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+
+    steps:
+    - name: 1. 检出代码
+      uses: actions/checkout@v4
+
+    - name: 2. 下载指定USB刷机包
+      run: |
+        echo "下载海纳思官方USB刷机包 (mdmo1g型号)..."
+        wget --no-check-certificate -c "https://node4.histb.com:9088/update/system/mv100-mdmo1g-usb-flash.zip" -O original_usb.zip
+        echo "下载完成:"
+        ls -lh original_usb.zip
+
+    - name: 3. 解压并备份原系统文件
+      run: |
+        mkdir -p usb_template
+        unzip -q original_usb.zip -d usb_template/
+        echo "包内容:"
+        ls -la usb_template/mv100/
+        cp "usb_template/mv100/www_ecoo_top.ext4" original_system.ext4
+        echo "✅ 已备份原系统文件:"
+        ls -lh original_system.ext4
+
+    - name: 4. 安装依赖
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-user-static e2fsprogs zip
+
+    - name: 5. 执行独立脚本构建纯净系统
+      run: |
+        chmod +x build_usb_rootfs.sh
+        ./build_usb_rootfs.sh
+
+    - name: 6. 创建纯净EXT4镜像
+      run: |
+        ORIG_SIZE=$(stat -c%s "original_system.ext4")
+        echo "基于原始大小 ($ORIG_SIZE 字节) 创建镜像..."
+        PURE_IMG="usb-rootfs-pure.ext4"
+        dd if=/dev/zero of="$PURE_IMG" bs=1 count=0 seek=$ORIG_SIZE status=progress
+        mkfs.ext4 -F -L "pure_root" "$PURE_IMG"
+        mkdir -p temp_mount
+        sudo mount -o loop "$PURE_IMG" temp_mount
+        sudo cp -a usb_pure_rootfs/* temp_mount/
+        sync
+        sudo umount temp_mount
+        e2fsck -p -f "$PURE_IMG" || true
+        echo "✅ 纯净镜像:"
+        ls -lh "$PURE_IMG"
+
+    - name: 7. 替换并重新打包
+      run: |
+        FINAL_DIR="USB-hi3798mv100-mdmo1g-PURE"
+        rm -rf "$FINAL_DIR"
+        cp -r usb_template "$FINAL_DIR"
+        rm -f "$FINAL_DIR/mv100/www_ecoo_top.ext4"
+        cp usb-rootfs-pure.ext4 "$FINAL_DIR/mv100/www_ecoo_top.ext4"
+        echo "刷机包内容:"
+        ls -l "$FINAL_DIR/mv100/"
+        cd "$FINAL_DIR"
+        zip -r "../USB-hi3798mv100-mdmo1g-PURE-$(date +%Y%m%d).zip" .
+        cd ..
+        echo "✅ 最终刷机包:"
+        ls -lh USB-hi3798mv100-mdmo1g-PURE-*.zip
+
+    - name: 8. 上传产物
+      uses: actions/upload-artifact@v4
+      with:
+        name: pure-usb-package
+        path: |
+          USB-hi3798mv100-mdmo1g-PURE-*.zip
+          usb-rootfs-pure.ext4
+        retention-days: 7
+
+    - name: 9. 清理
+      if: always()
+      run: |
+        sudo rm -rf usb_pure_rootfs temp_mount usb_template 2>/dev/null || true
+        rm -f original_usb.zip original_system.ext4 2>/dev/null || true
+        echo "清理完成。"
