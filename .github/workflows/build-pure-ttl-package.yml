@@ -37,6 +37,14 @@ jobs:
 
     - name: 6. 创建纯净镜像
       run: |
+        # 先检查目录是否存在
+        if [ ! -d "usb_pure_rootfs" ]; then
+          echo "错误: usb_pure_rootfs 目录不存在"
+          echo "当前目录内容:"
+          ls -la
+          exit 1
+        fi
+        
         ORIG_SIZE=$(stat -c%s "ttl_template/rootfs-32.img")
         echo "基于原始大小 ($ORIG_SIZE 字节) 创建镜像..."
         
@@ -45,9 +53,10 @@ jobs:
         
         mkdir -p temp_mount
         sudo mount -o loop rootfs-32-pure.img temp_mount
-        sudo cp -a pure_rootfs/* temp_mount/
+        sudo cp -a usb_pure_rootfs/* temp_mount/
         sync
         sudo umount temp_mount
+        rmdir temp_mount
         
         echo "镜像创建成功:"
         ls -lh rootfs-32-pure.img
@@ -72,3 +81,10 @@ jobs:
           TTL-hi3798mv100-32bit-PURE-*.zip
           rootfs-32-pure.img
         retention-days: 7
+
+    - name: 9. 清理
+      if: always()
+      run: |
+        sudo rm -rf usb_pure_rootfs temp_mount ttl_template final_package 2>/dev/null || true
+        rm -f original_ttl.zip 2>/dev/null || true
+        echo "清理完成。"
