@@ -18,9 +18,12 @@ jobs:
           git config --global core.askpass ""
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          # 配置Alpine镜像源（加速下载）
-          echo "https://mirrors.ustc.edu.cn/alpine/v3.20/main/" > /tmp/alpine.repo
-          echo "https://mirrors.ustc.edu.cn/alpine/v3.20/community/" >> /tmp/alpine.repo
+          # 提前创建Alpine repo文件（后续复制到镜像内）
+          mkdir -p /tmp/alpine-repo
+          cat > /tmp/alpine-repo/repositories << 'EOF'
+          https://mirrors.ustc.edu.cn/alpine/v3.20/main
+          https://mirrors.ustc.edu.cn/alpine/v3.20/community
+          EOF
 
       - name: 2. 安装编译依赖（原生构建工具）
         run: |
@@ -28,12 +31,12 @@ jobs:
             qemu-user-static binfmt-support debootstrap \
             xz-utils dosfstools parted curl wget \
             squashfs-tools genisoimage libssl-dev \
-            build-essential kmod
+            build-essential kmod qemu-img qemu-nbd rsync sfdisk
 
       - name: 3. 下载Alpine官方构建工具（mkimage）
         run: |
           mkdir -p alpine-build && cd alpine-build
-          # 从Alpine官方仓库下载mkimage脚本（ARMv7适配版）
+          # 从Alpine官方仓库下载mkimage脚本
           wget -O mkimage.sh https://raw.githubusercontent.com/alpinelinux/alpine-make-vm-image/master/alpine-make-vm-image \
             || wget -O mkimage.sh https://ghproxy.com/https://raw.githubusercontent.com/alpinelinux/alpine-make-vm-image/master/alpine-make-vm-image
           chmod +x mkimage.sh
@@ -41,21 +44,22 @@ jobs:
           sudo update-binfmts --enable qemu-arm
           sudo systemctl restart binfmt-support
 
-      - name: 4. 构建Hi3798MV100专用Alpine镜像（核心步骤）
+      - name: 4. 构建Hi3798MV100专用Alpine镜像（核心修复）
         run: |
           cd alpine-build
           # 定义构建参数（适配Hi3798MV100 ARMv7）
           IMAGE_NAME="alpine-hi3798mv100.img"
           IMAGE_SIZE="2G"
-          # 预装依赖：核心工具+海思适配驱动
-          PACKAGES="linux-lts openssh-server busybox udev kmod ethtool wireless-tools \
-                    dhcpcd5 wpa_supplicant nano"
+          # 预装依赖：核心工具+海思适配驱动（精简版，避免依赖冲突）
+          PACKAGES="linux-lts openssh-server busybox udev kmod ethtool wireless-tools dhcpcd5 wpa_supplicant nano"
           
-          # 执行官方构建脚本，生成ARMv7镜像
+          # 核心修复：使用正确参数（--mirror-uri 指定镜像源，--repositories-file 指定repo文件）
           sudo ./mkimage.sh \
             --image-size "$IMAGE_SIZE" \
             --arch armhf \
-            --repository "$(cat /tmp/alpine.repo)" \
+            --mirror-uri "https://mirrors.ustc.edu.cn/alpine" \
+            --repositories-file "/tmp/alpine-repo/repositories" \
+            --kernel-flavor lts \
             --packages "$PACKAGES" \
             --script-chroot \
             "$IMAGE_NAME" << 'EOF'
@@ -83,6 +87,10 @@ jobs:
           # 5. 禁用不必要服务，降低资源占用
           rc-update del cron default
           rc-update del bluetooth default
+          # 6. 修复镜像源（确保后续apk安装可用）
+          cp /etc/apk/repositories /etc/apk/repositories.bak
+          echo "https://mirrors.ustc.edu.cn/alpine/v3.20/main" > /etc/apk/repositories
+          echo "https://mirrors.ustc.edu.cn/alpine/v3.20/community" >> /etc/apk/repositories
           EOF
 
       - name: 5. 修复镜像权限（便于刷机）
