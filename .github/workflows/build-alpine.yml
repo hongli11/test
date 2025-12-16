@@ -7,78 +7,100 @@ on:
       - '.github/workflows/build-alpine.yml'
   pull_request:
     branches: [ main ]
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
 
 jobs:
   build-alpine:
     runs-on: ubuntu-22.04
     steps:
-      - name: 0. 配置 Git 无交互模式（核心修复）
+      - name: 1. 基础配置（禁用Git交互+网络优化）
         run: |
+          git config --global core.askpass ""
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          # 禁用 Git 交互提示，避免要求输入用户名密码
-          git config --global core.askpass ""
+          # 配置Alpine镜像源（加速下载）
+          echo "https://mirrors.ustc.edu.cn/alpine/v3.20/main/" > /tmp/alpine.repo
+          echo "https://mirrors.ustc.edu.cn/alpine/v3.20/community/" >> /tmp/alpine.repo
 
-      - name: 1. 拉取代码仓库
-        uses: actions/checkout@v4
-
-      - name: 2. 安装编译依赖+网络优化
+      - name: 2. 安装编译依赖（原生构建工具）
         run: |
           sudo apt update && sudo apt install -y \
-            git build-essential debootstrap qemu-user-static binfmt-support \
-            flex bison libssl-dev liblzma-dev xz-utils dosfstools parted \
-            curl wget  # 补充网络工具
-          # 临时切换 GitHub 镜像（解决克隆404）
-          git config --global url."https://github.com.cnpmjs.org/".insteadOf "https://github.com/"
+            qemu-user-static binfmt-support debootstrap \
+            xz-utils dosfstools parted curl wget \
+            squashfs-tools genisoimage libssl-dev \
+            build-essential kmod
 
-      - name: 3. 拉取 Alpine 构建工具（带重试机制）
+      - name: 3. 下载Alpine官方构建工具（mkimage）
         run: |
-          # 重试3次克隆，避免网络波动
-          for i in {1..3}; do
-            git clone https://github.com/nmeum/alpine-builder.git && break
-            echo "克隆失败，第 $i 次重试..."
-            sleep 5
-          done
-          cd alpine-builder
-          git checkout 3.20 || git checkout master  # 兼容分支不存在的情况
-          # 恢复原 GitHub 地址（避免后续依赖拉取异常）
-          git config --global --unset url."https://github.com.cnpmjs.org/".insteadOf
-
-      - name: 4. 创建定制配置文件（适配 Hi3798MV100）
-        run: |
-          cd alpine-builder
-          cat > config.sh << 'EOF'
-          #!/bin/bash
-          ARCH="armhf"  # Hi3798MV100 ARMv7 架构
-          ALPINE_VERSION="3.20"
-          ROOTFS_SIZE="2048"
-          OUTPUT_DIR="./alpine-hi3798mv100"
-          PACKAGES="linux-lts openssh-server busybox udev kmod ethtool wireless-tools"
-          IP_ADDR="192.168.0.100"
-          NETMASK="255.255.255.0"
-          GATEWAY="192.168.0.1"
-          DNS="8.8.8.8"
-          QEMU_BIN="/usr/bin/qemu-arm-static"
-          EOF
-          chmod +x config.sh
-
-      - name: 5. 启用 ARM 架构模拟
-        run: |
+          mkdir -p alpine-build && cd alpine-build
+          # 从Alpine官方仓库下载mkimage脚本（ARMv7适配版）
+          wget -O mkimage.sh https://raw.githubusercontent.com/alpinelinux/alpine-make-vm-image/master/alpine-make-vm-image \
+            || wget -O mkimage.sh https://ghproxy.com/https://raw.githubusercontent.com/alpinelinux/alpine-make-vm-image/master/alpine-make-vm-image
+          chmod +x mkimage.sh
+          # 启用ARM架构模拟
           sudo update-binfmts --enable qemu-arm
           sudo systemctl restart binfmt-support
 
-      - name: 6. 编译 Alpine 镜像（增加超时保护）
+      - name: 4. 构建Hi3798MV100专用Alpine镜像（核心步骤）
         run: |
-          cd alpine-builder
-          # 限制编译超时为1小时，避免卡死
-          timeout 3600 sudo ./build.sh -c config.sh
+          cd alpine-build
+          # 定义构建参数（适配Hi3798MV100 ARMv7）
+          IMAGE_NAME="alpine-hi3798mv100.img"
+          IMAGE_SIZE="2G"
+          # 预装依赖：核心工具+海思适配驱动
+          PACKAGES="linux-lts openssh-server busybox udev kmod ethtool wireless-tools \
+                    dhcpcd5 wpa_supplicant nano"
+          
+          # 执行官方构建脚本，生成ARMv7镜像
+          sudo ./mkimage.sh \
+            --image-size "$IMAGE_SIZE" \
+            --arch armhf \
+            --repository "$(cat /tmp/alpine.repo)" \
+            --packages "$PACKAGES" \
+            --script-chroot \
+            "$IMAGE_NAME" << 'EOF'
+          # 镜像内初始化配置（适配Hi3798MV100）
+          # 1. 设置root密码（默认：alpine123）
+          echo "root:alpine123" | chpasswd
+          # 2. 启用SSH服务
+          rc-update add sshd default
+          # 3. 配置网络（静态IP，适配Hi3798MV100机顶盒）
+          cat > /etc/network/interfaces << 'NETCONF'
+          auto lo
+          iface lo inet loopback
 
-      - name: 7. 上传编译产物
+          auto eth0
+          iface eth0 inet static
+              address 192.168.0.100
+              netmask 255.255.255.0
+              gateway 192.168.0.1
+              dns-nameservers 8.8.8.8 114.114.114.114
+          NETCONF
+          # 4. 加载Hi3798MV100核心驱动（提前适配）
+          echo "dwc2" >> /etc/modules
+          echo "usb-storage" >> /etc/modules
+          echo "rtl8188eu" >> /etc/modules  # 常见WIFI驱动
+          # 5. 禁用不必要服务，降低资源占用
+          rc-update del cron default
+          rc-update del bluetooth default
+          EOF
+
+      - name: 5. 修复镜像权限（便于刷机）
+        run: |
+          cd alpine-build
+          # 调整镜像分区格式（适配Hi3798MV100刷机）
+          sudo parted -s "$IMAGE_NAME" mklabel msdos
+          sudo parted -s "$IMAGE_NAME" mkpart primary ext4 1M 100%
+          # 压缩镜像（减小体积）
+          gzip -9 "$IMAGE_NAME" -c > "${IMAGE_NAME}.gz"
+
+      - name: 6. 上传编译产物
         uses: actions/upload-artifact@v4
         with:
           name: alpine-hi3798mv100-image
-          path: alpine-builder/alpine-hi3798mv100/*.img
-          if-no-files-found: warn  # 无产物时仅警告，便于排查
+          path: |
+            alpine-build/alpine-hi3798mv100.img
+            alpine-build/alpine-hi3798mv100.img.gz
+          if-no-files-found: error
           compression-level: 6
           overwrite: true
