@@ -1,0 +1,67 @@
+name: Build Alpine Linux for Hi3798MV100 (ARMv7)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build-alpine.yml'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  build-alpine:
+    runs-on: ubuntu-22.04  # 稳定编译环境
+    steps:
+      - name: 1. 拉取代码仓库
+        uses: actions/checkout@v4
+
+      - name: 2. 安装编译依赖
+        run: |
+          sudo apt update && sudo apt install -y \
+            git build-essential debootstrap qemu-user-static binfmt-support \
+            flex bison libssl-dev liblzma-dev xz-utils dosfstools parted
+
+      - name: 3. 拉取 Alpine 构建工具
+        run: |
+          git clone https://github.com/nmeum/alpine-builder.git
+          cd alpine-builder
+          git checkout 3.20  # 锁定稳定版本
+
+      - name: 4. 创建定制配置文件（适配 Hi3798MV100）
+        run: |
+          cd alpine-builder
+          cat > config.sh << 'EOF'
+          #!/bin/bash
+          ARCH="armhf"  # Hi3798MV100 对应 ARMv7 架构
+          ALPINE_VERSION="3.20"
+          ROOTFS_SIZE="2048"  # 根文件系统 2G
+          OUTPUT_DIR="./alpine-hi3798mv100"
+          # 预装核心工具+驱动依赖
+          PACKAGES="linux-lts openssh-server busybox udev kmod ethtool wireless-tools"
+          IP_ADDR="192.168.0.100"
+          NETMASK="255.255.255.0"
+          GATEWAY="192.168.0.1"
+          DNS="8.8.8.8"
+          QEMU_BIN="/usr/bin/qemu-arm-static"
+          EOF
+          chmod +x config.sh
+
+      - name: 5. 启用 ARM 架构模拟（交叉编译必需）
+        run: |
+          sudo update-binfmts --enable qemu-arm
+          sudo systemctl restart binfmt-support
+
+      - name: 6. 编译 Alpine 镜像
+        run: |
+          cd alpine-builder
+          sudo ./build.sh -c config.sh  # 执行构建脚本
+
+      - name: 7. 上传编译产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpine-hi3798mv100-image
+          path: alpine-builder/alpine-hi3798mv100/*.img  # 上传生成的镜像文件
+          if-no-files-found: error  # 无产物时标记失败
+          compression-level: 6
+          overwrite: true
