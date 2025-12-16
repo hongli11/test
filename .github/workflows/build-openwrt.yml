@@ -1,0 +1,112 @@
+name: Build OpenWrt for Hi3798MV100
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  build-openwrt:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180  # 编译耗时较长，设置3小时超时
+    permissions:
+      contents: write  # 需写入权限上传产物
+
+    steps:
+      # 1. 基础环境准备（安装编译依赖）
+      - name: Install dependencies
+        run: |
+          sudo apt update -y && sudo apt full-upgrade -y
+          sudo apt install -yq \
+            build-essential flex bison gawk gcc-multilib g++-multilib \
+            gettext ncurses-dev libncurses5-dev libssl-dev libelf-dev \
+            zlib1g-dev git curl wget rsync unzip xz-utils python3 python3-pip \
+            perl patch diffutils file make cmake ninja-build
+
+      # 2. 拉取OpenWrt 23.05稳定版源码
+      - name: Clone OpenWrt source
+        run: |
+          git clone -b openwrt-23.05 --single-branch https://github.com/openwrt/openwrt.git openwrt
+          cd openwrt
+          # 更新feeds（确保包索引最新）
+          ./scripts/feeds update -a && ./scripts/feeds install -a
+
+      # 3. 配置编译参数（适配Hi3798MV100）
+      - name: Configure OpenWrt
+        run: |
+          cd openwrt
+          # 创建自定义配置文件（核心：ARMv7架构+Hi3798MV100驱动+常用包）
+          cat > .config << 'EOF'
+          # 架构配置（Hi3798MV100=ARMv7，对应armsr/armv7）
+          CONFIG_TARGET_armsr=y
+          CONFIG_TARGET_armsr_armv7=y
+          CONFIG_TARGET_armsr_armv7_DEVICE_generic=y  # 通用ARMv7设备适配
+          
+          # 内核配置（启用必要驱动）
+          CONFIG_KERNEL_BUILD_USER="hongli"
+          CONFIG_KERNEL_BUILD_DOMAIN="github.actions"
+          CONFIG_KERNEL_MODULES=y
+          CONFIG_KERNEL_FIRMWARE_IN_KERNEL=y
+          CONFIG_KERNEL_DWC2=y  # USB驱动
+          CONFIG_KERNEL_USB_STORAGE=y  # USB存储支持
+          CONFIG_KERNEL_RTL8188EU=y  # 无线网卡驱动（根据实际硬件调整）
+          CONFIG_KERNEL_NET_ETHERNET=y
+          CONFIG_KERNEL_MII=y
+          
+          # 基础功能包（按需增减）
+          CONFIG_PACKAGE_sshfs=y
+          CONFIG_PACKAGE_openssh-server=y
+          CONFIG_PACKAGE_openssh-client=y
+          CONFIG_PACKAGE_wget=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_nano=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_dhcpcd=y
+          CONFIG_PACKAGE_wpa_supplicant=y
+          CONFIG_PACKAGE_hostapd=y
+          
+          # Web管理界面（LuCI）
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_luci-app-opkg=y
+          CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-app-network=y
+          
+          # 存储支持
+          CONFIG_PACKAGE_kmod-fs-ext4=y
+          CONFIG_PACKAGE_kmod-fs-ntfs=y
+          CONFIG_PACKAGE_kmod-fs-vfat=y
+          
+          # 编译优化（启用多线程）
+          CONFIG_BUILD_OPTIMIZATION="-O2"
+          CONFIG_BUILD_GCC_NO_LTO=y
+          CONFIG_CPU_TYPE="cortex-a7"  # Hi3798MV100是Cortex-A7内核
+          CONFIG_CPU_SUBTYPE="neon-vfpv4"
+          
+          # 镜像配置（生成raw格式，支持直接写入存储）
+          CONFIG_TARGET_ROOTFS_PARTSIZE=512  # 根分区512MB
+          CONFIG_TARGET_IMAGES_GZIP=y  # 镜像压缩为gz格式
+          CONFIG_TARGET_IMAGES_RAW=y
+          EOF
+          
+          # 加载配置并自动解决依赖冲突
+          make defconfig
+
+      # 4. 编译OpenWrt（多线程加速）
+      - name: Build OpenWrt
+        run: |
+          cd openwrt
+          # 查看CPU核心数，设置编译线程数（核心数+1）
+          CPU_CORES=$(nproc)
+          echo "Using $CPU_CORES+1 threads for compilation"
+          make -j$((CPU_CORES + 1)) V=s  # V=s 显示编译详情（出错时便于排查）
+
+      # 5. 上传编译产物（镜像文件）
+      - name: Upload OpenWrt artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-hi3798mv100
+          path: |
+            openwrt/bin/targets/armsr/armv7/*.img.gz
+            openwrt/bin/targets/armsr/armv7/*.tar.gz
+            openwrt/bin/targets/armsr/armv7/*.manifest
+          retention-days: 90  # 产物保留90天
